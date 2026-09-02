@@ -27,7 +27,8 @@ type SggPick = { name: string; sido?: string; parentSi?: string };
 
 const GWANGJU_GU = new Set(["동구", "서구", "남구", "북구", "광산구"]);
 const GENERIC_GU = new Set(["중구", "동구", "서구", "남구", "북구", "강서구"]);
-const FACILITY_SKIP = /학교|불교|종교|비교|선교|등교|하교|폐교|개교|교과/;
+const AMBIGUOUS_SGG = new Set([...GENERIC_GU, "고성군"]);
+const FACILITY_SKIP = /학교|불교|종교|비교|선교|등교|하교|폐교|개교|교과|교통/;
 const FACILITY_RE = /([가-힣0-9]{0,12}(?:잠수교|하상도로)|[가-힣]{2,8}교)/g;
 const SENDER_RE = /\[([^\[\]\n]{1,40})\]\s*$/;
 
@@ -100,24 +101,33 @@ function displaySido(sido: string | undefined, sgg?: string, matched?: string): 
 
 function sidoInContext(
   db: NonNullable<typeof cache>,
-  row: { sido?: string; parentSi?: string | null },
+  row: { name?: string; sido?: string; parentSi?: string | null },
   context: string,
 ): boolean {
   if (row.parentSi && row.parentSi.length >= 2 && context.includes(row.parentSi)) return true;
   if (!row.sido) return false;
+  if (row.name === "고성군") {
+    if (row.sido.startsWith("강원") && /동해안|설악|속초/.test(context)) return true;
+    if (row.sido === "경상남도" && /통영|사천|거제|남해안/.test(context)) return true;
+  }
   return (db.sidoNames.get(row.sido) ?? [row.sido]).some((name) => name.length >= 2 && context.includes(name));
+}
+
+function preferCompactSgg(rows: SggRow[]): SggRow {
+  const compact = rows.filter((row) => row.parentSi && row.name.startsWith(row.parentSi) && row.name !== row.parentSi);
+  return compact[0] ?? rows[0];
 }
 
 function pickSgg(db: NonNullable<typeof cache>, rows: SggRow[], context: string): SggPick | null {
   if (rows.length === 1) {
     const row = rows[0];
-    if (GENERIC_GU.has(row.name) && !sidoInContext(db, row, context)) return null;
+    if (AMBIGUOUS_SGG.has(row.name) && !sidoInContext(db, row, context)) return null;
     return row;
   }
   const scoped = rows.filter((row) => sidoInContext(db, row, context));
   if (scoped.length === 1) return scoped[0];
-  if (scoped.length > 1) return scoped[0];
-  return { name: rows[0].name };
+  if (scoped.length > 1) return preferCompactSgg(scoped);
+  return null;
 }
 
 function pickEmd(db: NonNullable<typeof cache>, rows: EmdRow[], context: string): EmdRow | null {
@@ -148,10 +158,16 @@ function fullLabel(
   const sido = displaySido(row.sido, row.sgg ?? (type === "sgg" ? row.name : undefined), matchedSido);
   if (type === "sido") return sido || row.name;
   if (type === "sgg") {
-    return [sido, row.parentSi, row.name].filter(Boolean).filter((item, i, arr) => arr.indexOf(item) === i).join(" ");
+    const name = row.name;
+    return [sido, row.parentSi && !name.startsWith(row.parentSi) ? row.parentSi : undefined, name]
+      .filter(Boolean)
+      .filter((item, i, arr) => arr.indexOf(item) === i)
+      .join(" ");
   }
   if (type === "emd") {
-    return [sido, row.parentSi, row.sgg, row.name].filter(Boolean).filter((item, i, arr) => arr.indexOf(item) === i).join(" ");
+    const sgg = row.sgg;
+    const parentSi = row.parentSi && sgg && !sgg.startsWith(row.parentSi) ? row.parentSi : undefined;
+    return [sido, parentSi, sgg, row.name].filter(Boolean).filter((item, i, arr) => arr.indexOf(item) === i).join(" ");
   }
   if (type === "ri") return [sido, row.sgg, row.emd, row.name].filter(Boolean).join(" ");
   return row.name;
@@ -260,6 +276,8 @@ export function extractGazetteerHits(text: string, hint = ""): GazetteerHit[] {
     const value = match[0];
     if (value.length < 2 || FACILITY_SKIP.test(value)) continue;
     const start = match.index ?? 0;
+    const after = text[start + value.length] ?? "";
+    if (/교$/.test(value) && /[가-힣]/.test(after)) continue;
     add({
       text: value,
       label: value,
@@ -292,15 +310,26 @@ export function resolveSggInSido(sidoHint: string, place: string): string[] {
   if (!gazSido) return [];
   const rows = load().file.sgg.filter((row) => row.sido === gazSido);
   const has = (name: string) => rows.some((row) => row.name === name);
-  if (/(시|군|구)$/.test(place)) return has(place) ? [place] : [];
-  return [`${place}시`, `${place}군`, `${place}구`].filter(has);
+  const base = /(시|군|구)$/.test(place) ? (has(place) ? [place] : []) : [`${place}시`, `${place}군`, `${place}구`].filter(has);
+  const out: string[] = [];
+  for (const name of base) {
+    const kids = rows.filter((row) => row.parentSi === name);
+    if (kids.length === 0) {
+      out.push(name);
+      continue;
+    }
+    const compact = kids.filter((row) => row.name.startsWith(name) && row.name !== name);
+    out.push(...(compact.length > 0 ? compact : kids).map((row) => row.name));
+  }
+  return [...new Set(out)];
 }
 
 export function gazetteerLocations(text: string, extra: string[] = []): string[] {
   const hits = extractGazetteerHits(text, extra.join(" "));
   const labels: string[] = [];
   for (const item of extra) {
-    for (const part of item.split(/[,/·]/)) {
+    const glued = item.replace(/,\s*(?=[가-힣0-9]{2,25}(?:대로|로|길))/g, " ");
+    for (const part of glued.split(/[,/·]/)) {
       const trimmed = canonAdminLabel(part);
       if (trimmed && !labels.includes(trimmed)) labels.push(trimmed);
     }

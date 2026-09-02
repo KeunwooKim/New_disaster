@@ -1,24 +1,55 @@
 import { createHash } from "node:crypto";
 import { gazetteerLocations } from "./gazetteer";
+import { mergeStreetLocations } from "./street";
 import type { EventSource, LlmAnalysis, Severity } from "./types";
 
 const TYPE_KEYWORDS: Array<{ type: string; keys: string[]; severity: Severity }> = [
   { type: "민방공", keys: ["민방공", "공습경보", "경계경보"], severity: "critical" },
   { type: "지진", keys: ["지진", "여진"], severity: "critical" },
   { type: "산사태", keys: ["산사태"], severity: "high" },
-  { type: "호우", keys: ["호우", "폭우", "침수", "홍수"], severity: "high" },
+  {
+    type: "호우",
+    keys: ["호우", "폭우", "침수", "홍수", "소나기", "많은 비", "많은비", "강한 비", "강우", "방류", "비가 많이", "수위", "하수 역류", "빗물", "물이 차오"],
+    severity: "high",
+  },
   { type: "태풍", keys: ["태풍"], severity: "high" },
+  { type: "풍랑", keys: ["너울", "이안류", "풍랑", "연안사고"], severity: "high" },
   { type: "대설", keys: ["대설", "폭설"], severity: "high" },
   { type: "한파", keys: ["한파"], severity: "medium" },
-  { type: "폭염", keys: ["폭염", "온열", "열대야"], severity: "medium" },
+  { type: "폭염", keys: ["폭염", "온열", "열대야", "무더위", "무더운", "덥고", "더위", "더울", "최고기온", "기온이 높"], severity: "medium" },
   { type: "산불", keys: ["산불"], severity: "high" },
   { type: "미세먼지", keys: ["미세먼지", "황사"], severity: "low" },
   { type: "정전", keys: ["정전"], severity: "medium" },
   { type: "화재", keys: ["화재", "폭발"], severity: "high" },
-  { type: "실종", keys: ["실종", "찾아주세요", "목격", "인상착의", "치매", "가출인"], severity: "high" },
+  { type: "실종", keys: ["실종", "찾아주세요", "목격", "인상착의", "치매", "가출인", "배회중", "찾습니다"], severity: "high" },
+  { type: "물놀이", keys: ["물놀이", "구명조끼"], severity: "medium" },
   {
     type: "교통",
-    keys: ["교통통제", "도로통제", "교통사고", "교통정체", "통행제한", "통행 제한", "통제중", "통제해제", "하상도로", "잠수교"],
+    keys: [
+      "교통통제",
+      "도로통제",
+      "교통사고",
+      "교통정체",
+      "통행제한",
+      "통행 제한",
+      "통제중",
+      "통제해제",
+      "통제 해제",
+      "통제가 해제",
+      "부분통제",
+      "차단 해제",
+      "정상 통행",
+      "하상도로",
+      "잠수교",
+      "지하차도",
+      "고속도로",
+      "도로 통제",
+      "차량 통제",
+      "교통 통제",
+      "통제하오니",
+      "통제하니",
+      "서행",
+    ],
     severity: "medium",
   },
 ];
@@ -35,6 +66,26 @@ export function classifyDisasterType(text: string): { type: string; severity: Se
   return { type: "기타", severity: "medium" };
 }
 
+function dropContainedLocations(locations: string[]): string[] {
+  const compact = (name: string) => name.replace(/\s+/g, "");
+  const best = new Map<string, string>();
+  for (const loc of locations) {
+    const key = compact(loc);
+    if (!key) continue;
+    const prev = best.get(key);
+    if (!prev || loc.length > prev.length) best.set(key, loc);
+  }
+  const deduped = [...best.values()];
+  return deduped.filter((loc) => {
+    const tight = compact(loc);
+    return !deduped.some((other) => {
+      if (other === loc) return false;
+      const otherTight = compact(other);
+      return otherTight.includes(tight) && otherTight.length > tight.length;
+    });
+  });
+}
+
 export function extractRegions(text: string, extra: string[] = []): string[] {
   const found = new Set<string>();
   try {
@@ -47,13 +98,55 @@ export function extractRegions(text: string, extra: string[] = []): string[] {
       }
     }
   }
-  const matches = text.match(REGION_TOKEN) ?? [];
-  for (const match of matches) {
-    const trimmed = match.trim();
-    if (trimmed === "광주" && /광주시/.test(text) && !/광주광역시|전남광주/.test(text)) continue;
-    found.add(trimmed);
+  if (found.size === 0) {
+    const matches = text.match(REGION_TOKEN) ?? [];
+    for (const match of matches) found.add(match.trim());
   }
-  return dropCoarseParents([...found]);
+  return dropContainedLocations(
+    dropCoarseParents(
+      mergeStreetLocations(
+        text,
+        [...found]
+          .map((item) => canonLocation(item, text))
+          .filter((item): item is string => Boolean(item)),
+      ),
+    ),
+  );
+}
+
+export function canonLocation(item: string, text = ""): string | null {
+  let loc = item
+    .replace(/전남광주통합특별시/g, "전라남도")
+    .replace(/전남광주(?=\s|$)/g, "전라남도")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!loc) return null;
+  loc = loc
+    .replace(/^서울(?=\s)/, "서울특별시")
+    .replace(/^부산(?=\s)/, "부산광역시")
+    .replace(/^대구(?=\s)/, "대구광역시")
+    .replace(/^인천(?=\s)/, "인천광역시")
+    .replace(/^대전(?=\s)/, "대전광역시")
+    .replace(/^울산(?=\s)/, "울산광역시")
+    .replace(/^세종(?=\s)/, "세종특별자치시")
+    .replace(/^제주(?=\s)/, "제주특별자치도")
+    .replace(/^경기(?=\s)/, "경기도")
+    .replace(/^강원(?=\s)/, "강원특별자치도")
+    .replace(/^강원도(?=\s)/, "강원특별자치도")
+    .replace(/^충북(?=\s)/, "충청북도")
+    .replace(/^충남(?=\s)/, "충청남도")
+    .replace(/^전북(?=\s)/, "전북특별자치도")
+    .replace(/^전라북도(?=\s)/, "전북특별자치도")
+    .replace(/^전남(?=\s)/, "전라남도")
+    .replace(/^경북(?=\s)/, "경상북도")
+    .replace(/^경남(?=\s)/, "경상남도")
+    .replace(/([가-힣]+시)\s+\1/g, "$1");
+  if (loc === "제주" || loc === "제주도") return "제주특별자치도";
+  if (loc === "광주") {
+    if (/광주시/.test(text) && !/광주광역시/.test(text)) return "경기도 광주시";
+    return "광주광역시";
+  }
+  return loc;
 }
 
 function dropCoarseParents(locations: string[]): string[] {
@@ -64,6 +157,11 @@ function dropCoarseParents(locations: string[]): string[] {
   });
   if (!hasFine) return locations;
   return locations.filter((name) => !/(특별자치도|광역시|특별시|도)$/.test(last(name)));
+}
+
+export function cleanLocationList(items: string[], text = ""): string[] {
+  const canon = [...new Set(items.map((item) => canonLocation(item, text)).filter((item): item is string => Boolean(item)))];
+  return dropContainedLocations(dropCoarseParents(mergeStreetLocations(text, canon)));
 }
 
 export function parseCbsByRules(
@@ -86,19 +184,13 @@ export function parseCbsByRules(
     source === "missing" || source === "eqk" || source === "typhoon" || source === "landslide"
       ? "high"
       : classified.severity;
-  const extras = type === "지진" ? [] : knownRegions;
-  const locations = dropCoarseParents([
-    ...new Set(
-      extractRegions(text, extras)
-        .map((item) =>
-          item
-            .replace(/전남광주통합특별시/g, "전라남도")
-            .replace(/전남광주(?=\s|$)/g, "전라남도")
-            .trim(),
-        )
-        .filter(Boolean),
-    ),
-  ]);
+  const extras =
+    type === "지진"
+      ? []
+      : source === "missing"
+        ? [text.match(/발생장소\s*([^.]*)/)?.[1]?.trim()].filter((item): item is string => Boolean(item))
+        : knownRegions;
+  const locations = cleanLocationList(extractRegions(text, extras), text);
   const summary = text.replace(/\s+/g, " ").trim().slice(0, 180);
   const actions =
     type === "실종"

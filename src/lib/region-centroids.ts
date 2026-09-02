@@ -1,3 +1,5 @@
+import { SGG_CENTROIDS } from "./sgg-centroids";
+
 /** 시·도 및 주요 시군구 중심 좌표. Nominatim 실패 시 지도 표시용. */
 export const REGION_CENTROIDS: Record<string, [number, number]> = {
   서울특별시: [37.5665, 126.978],
@@ -94,6 +96,34 @@ export const REGION_CENTROIDS: Record<string, [number, number]> = {
   흥덕구: [36.644, 127.431],
 };
 
+function lastToken(name: string): string {
+  return name.trim().split(/\s+/).pop() ?? name;
+}
+
+function isCoarseSido(key: string): boolean {
+  const token = lastToken(key);
+  if (["서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종", "제주", "경기", "강원", "충북", "충남", "전북", "전남", "경북", "경남"].includes(key)) {
+    return true;
+  }
+  return /(?:특별자치도|광역시|특별시|도)$/.test(token);
+}
+
+const AMBIGUOUS_SHORT = new Set(["남구", "북구", "동구", "서구", "중구", "강서구", "고성군"]);
+
+const CENTROIDS: Record<string, [number, number]> = Object.fromEntries(
+  Object.entries({ ...SGG_CENTROIDS, ...REGION_CENTROIDS }).filter(([key]) => !AMBIGUOUS_SHORT.has(key)),
+);
+
+const SIDO_COORD_KEYS = new Set(
+  Object.entries(CENTROIDS)
+    .filter(([key]) => isCoarseSido(key))
+    .map(([, value]) => `${value[0].toFixed(4)},${value[1].toFixed(4)}`),
+);
+
+export function isSidoCentroidCoord(lat: number, lng: number): boolean {
+  return SIDO_COORD_KEYS.has(`${lat.toFixed(4)},${lng.toFixed(4)}`);
+}
+
 function adminSpecificity(key: string): number {
   if (/[읍면동]$/.test(key)) return 4;
   if (/구$/.test(key)) return 3;
@@ -105,23 +135,58 @@ export function normalizeRegionName(name: string): string {
   return name.replace(/전남광주통합특별시/g, "전라남도").replace(/\s+/g, " ").trim();
 }
 
-export function lookupCentroid(name: string): [number, number] | null {
-  const trimmed = normalizeRegionName(name);
-  if (!trimmed) return null;
-  if (REGION_CENTROIDS[trimmed]) return REGION_CENTROIDS[trimmed];
-
-  const parts = trimmed.split(" ");
-  for (let start = parts.length - 1; start >= 0; start -= 1) {
-    const slice = parts.slice(start).join(" ");
-    if (REGION_CENTROIDS[slice]) return REGION_CENTROIDS[slice];
-    if (REGION_CENTROIDS[parts[start]]) return REGION_CENTROIDS[parts[start]];
+function qualifyAmbiguous(name: string, context: string): string {
+  const token = lastToken(name);
+  if (!AMBIGUOUS_SHORT.has(token)) return name;
+  if (name.replace(/\s+/g, "").length > token.length) return name;
+  const hay = `${context} ${name}`;
+  if (token === "고성군") {
+    if (/동해안|설악|속초/.test(hay)) return "강원특별자치도 고성군";
+    if (/통영|사천|거제|남해안/.test(hay)) return "경상남도 고성군";
+    return name;
   }
+  const parents: Array<[RegExp, string]> = [
+    [/울산/, "울산광역시"],
+    [/부산/, "부산광역시"],
+    [/대구/, "대구광역시"],
+    [/인천/, "인천광역시"],
+    [/대전/, "대전광역시"],
+    [/서울/, "서울특별시"],
+    [/광주광역시|광주광역/, "광주광역시"],
+  ];
+  for (const [re, prefix] of parents) {
+    if (re.test(hay)) return `${prefix} ${token}`;
+  }
+  return name;
+}
 
-  const keys = Object.keys(REGION_CENTROIDS).sort(
-    (a, b) => adminSpecificity(b) - adminSpecificity(a) || b.length - a.length,
-  );
-  for (const key of keys) {
-    if (trimmed.includes(key)) return REGION_CENTROIDS[key];
+function candidateKeys(name: string): string[] {
+  const trimmed = normalizeRegionName(name);
+  const glued = trimmed.replace(/\s+/g, "");
+  const parts = trimmed.split(" ").filter(Boolean);
+  const keys = new Set<string>([trimmed, glued]);
+  for (let i = 0; i < parts.length; i += 1) {
+    for (let j = parts.length; j > i; j -= 1) {
+      const slice = parts.slice(i, j).join(" ");
+      keys.add(slice);
+      keys.add(slice.replace(/\s+/g, ""));
+    }
+  }
+  return [...keys].sort((a, b) => b.length - a.length || adminSpecificity(b) - adminSpecificity(a));
+}
+
+export function lookupCentroid(name: string, context = ""): [number, number] | null {
+  const trimmed = qualifyAmbiguous(normalizeRegionName(name), context);
+  if (!trimmed) return null;
+  if (AMBIGUOUS_SHORT.has(trimmed)) return null;
+  const queryFine = /(?:시|군|구|읍|면|동)$/.test(lastToken(trimmed)) && !isCoarseSido(trimmed);
+
+  for (const key of candidateKeys(trimmed)) {
+    if (AMBIGUOUS_SHORT.has(key)) continue;
+    const hit = CENTROIDS[key];
+    if (!hit) continue;
+    if (queryFine && isCoarseSido(key)) continue;
+    return hit;
   }
   return null;
 }

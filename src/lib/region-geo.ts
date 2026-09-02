@@ -89,7 +89,9 @@ function parseLocation(location: string): { sido: string | null; sgg: string | n
   }
   const tokens = [...rest.matchAll(/([가-힣]+(?:시|군|구))/g)].map((m) => m[1]);
   let sgg: string | null = null;
-  if (tokens.length >= 2 && /시$/.test(tokens[0]) && /구$/.test(tokens[1])) {
+  if (rest === "전체") {
+    sgg = null;
+  } else if (tokens.length >= 2 && /시$/.test(tokens[0]) && /구$/.test(tokens[1])) {
     sgg = compact(tokens[0] + tokens[1]);
   } else if (tokens.length > 0) {
     sgg = compact(tokens[0]);
@@ -123,7 +125,17 @@ export function matchRegionFeatures(location: string, geo: RegionCollection): Re
       const scoped = hits.filter((feature) => feature.properties.sido === sido);
       if (scoped.length > 0) hits = scoped;
     }
+    if (hits.length === 0) {
+      const parentSi = sgg.match(/^([가-힣]+시)/)?.[1];
+      if (parentSi && parentSi !== sgg) {
+        hits = sggList.filter(
+          (feature) =>
+            feature.properties.name === parentSi && (!sido || feature.properties.sido === sido),
+        );
+      }
+    }
     if (hits.length > 0) return hits;
+    return [];
   }
 
   if (sido) {

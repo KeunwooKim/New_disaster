@@ -3,8 +3,10 @@
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AlertEvent, EventSource, IngestResult } from "@/lib/types";
-import { EVENT_SOURCE_LABEL, EVENT_SOURCES } from "@/lib/types";
+import { DATA_CREDIT_LINE, EVENT_SOURCE_CREDIT, EVENT_SOURCE_LABEL, EVENT_SOURCES } from "@/lib/types";
 import { disasterStyle, disasterTypeOf, mapKindForEvent } from "@/lib/map-shape";
+import { DateFilter } from "./DateFilter";
+import { eventPlaceLine, formatOccurredAt, formatOccurredShort, seoulDay } from "@/lib/event-display";
 
 const AlertMap = dynamic(() => import("./AlertMap").then((mod) => mod.AlertMap), {
   ssr: false,
@@ -16,17 +18,6 @@ const AlertMap = dynamic(() => import("./AlertMap").then((mod) => mod.AlertMap),
 });
 
 type SourceFilter = "all" | EventSource;
-
-function formatTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return new Intl.DateTimeFormat("ko-KR", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(date);
-}
 
 function statusLabel(event: AlertEvent): string {
   if (event.analysisStatus === "ner") return "NER 위치";
@@ -51,17 +42,6 @@ function coordLabel(event: AlertEvent): string | null {
           ? "캐시 좌표"
           : "좌표";
   return `${kind} ${event.lat.toFixed(5)}, ${event.lng.toFixed(5)}`;
-}
-
-function seoulDay(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  return new Intl.DateTimeFormat("en-CA", {
-    timeZone: "Asia/Seoul",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-  }).format(date);
 }
 
 function matchesQuery(event: AlertEvent, query: string): boolean {
@@ -122,18 +102,54 @@ export function Dashboard() {
   const [typeFilter, setTypeFilter] = useState("all");
   const [query, setQuery] = useState("");
   const [queryDebounced, setQueryDebounced] = useState("");
+  const [dateFrom, setDateFrom] = useState<string | null>(null);
+  const [dateTo, setDateTo] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [ingesting, setIngesting] = useState(false);
   const [ingestInfo, setIngestInfo] = useState<string | null>(null);
+  const [meta, setMeta] = useState({
+    total: 0,
+    returned: 0,
+    limit: 200,
+    recentFrom: null as string | null,
+    recentTo: null as string | null,
+    days: {} as Record<string, number>,
+  });
 
   const load = useCallback(async () => {
-    const qs = sourceFilter === "all" ? "" : `?source=${sourceFilter}`;
-    const response = await fetch(`/api/events${qs}`, { cache: "no-store" });
-    const data = (await response.json()) as { events: AlertEvent[] };
+    const params = new URLSearchParams();
+    if (dateFrom && dateTo) {
+      params.set("from", dateFrom);
+      params.set("to", dateTo);
+    } else {
+      params.set("limit", "200");
+    }
+    const response = await fetch(`/api/events?${params}`, { cache: "no-store" });
+    const data = (await response.json()) as {
+      events: AlertEvent[];
+      meta?: {
+        total: number;
+        returned: number;
+        limit: number;
+        recentFrom: string | null;
+        recentTo: string | null;
+        days: Record<string, number>;
+      };
+    };
     setEvents(data.events);
+    if (data.meta) {
+      setMeta({
+        total: data.meta.total,
+        returned: data.meta.returned,
+        limit: data.meta.limit,
+        recentFrom: data.meta.recentFrom,
+        recentTo: data.meta.recentTo,
+        days: data.meta.days,
+      });
+    }
     setLoading(false);
-  }, [sourceFilter]);
+  }, [dateFrom, dateTo]);
 
   useEffect(() => {
     void load();
@@ -255,6 +271,25 @@ export function Dashboard() {
           placeholder="위치·내용 검색"
           className="w-full max-w-xs rounded-full border border-[#243049] bg-[#0b1220] px-3 py-1.5 text-sm text-[#d5deee] outline-none placeholder:text-[#93a0b8] focus:border-[#93a0b8]"
         />
+        <DateFilter
+          recentFrom={meta.recentFrom}
+          recentTo={meta.recentTo}
+          from={dateFrom}
+          to={dateTo}
+          days={meta.days}
+          total={meta.total}
+          recentLimit={meta.limit}
+          onRecent={() => {
+            setDateFrom(null);
+            setDateTo(null);
+            setSelectedId(null);
+          }}
+          onRange={(nextFrom, nextTo) => {
+            setDateFrom(nextFrom);
+            setDateTo(nextTo);
+            setSelectedId(null);
+          }}
+        />
         <button
           type="button"
           onClick={() => {
@@ -295,7 +330,7 @@ export function Dashboard() {
             <p className="p-4 text-sm text-[#93a0b8]">불러오는 중…</p>
           ) : visible.length === 0 ? (
             <p className="p-4 text-sm text-[#93a0b8]">
-              {queryDebounced || typeFilter !== "all"
+              {queryDebounced || typeFilter !== "all" || dateFrom
                 ? "조건에 맞는 재난이 없습니다."
                 : "표시할 이벤트가 없습니다."}
             </p>
@@ -322,8 +357,9 @@ export function Dashboard() {
                         >
                           {disasterStyle(disasterTypeOf(event)).emoji} {disasterTypeOf(event)}
                         </span>
-                        <span className="text-[11px] text-[#93a0b8]">{formatTime(event.occurredAt)}</span>
+                        <span className="text-[11px] text-[#93a0b8]">{formatOccurredShort(event.occurredAt)}</span>
                       </div>
+                      <p className="mb-1 text-[11px] text-[#93a0b8]">{EVENT_SOURCE_CREDIT[event.source]}</p>
                       <p className="line-clamp-2 text-sm">
                         {event.llm?.summary ?? event.rawText}
                       </p>
@@ -353,9 +389,10 @@ export function Dashboard() {
               지도 전체 보기
             </button>
           ) : null}
-          <div className="pointer-events-none absolute bottom-3 left-3 z-[1000] rounded-md bg-[#0b1220]/85 px-2.5 py-1.5 text-[11px] leading-4 text-[#d5deee] shadow">
+          <div className="pointer-events-none absolute bottom-3 left-3 z-[1000] max-w-[min(92%,28rem)] rounded-md bg-[#0b1220]/85 px-2.5 py-1.5 text-[11px] leading-4 text-[#d5deee] shadow">
             <p>💧 호우 · 🔆 폭염 · ⚡ 정전 · 👤 실종 · 🚗 교통</p>
             <p className="text-[#93a0b8]">주의보·시군구는 색칠 · 실종·사고는 좌표 마커</p>
+            <p className="mt-1 text-[#93a0b8]">{DATA_CREDIT_LINE}</p>
           </div>
         </section>
 
@@ -366,29 +403,39 @@ export function Dashboard() {
                 <h2 className="text-base font-semibold">
                   {disasterStyle(disasterTypeOf(selected)).emoji} {disasterTypeOf(selected)}
                 </h2>
-                <span className="text-[11px] text-[#93a0b8]">{statusLabel(selected)}</span>
-              </div>
-              <p className="text-[#93a0b8]">
-                {formatTime(selected.occurredAt)}
-                <span className="ml-2 rounded bg-[#1b2740] px-1.5 py-0.5 text-[11px] text-[#d5deee]">
-                  {mapKindForEvent(selected) === "area" ? "지도: 지역 범위" : "지도: 지점 마커"}
+                <span className="rounded bg-[#1b2740] px-1.5 py-0.5 text-[11px] text-[#d5deee]">
+                  {EVENT_SOURCE_LABEL[selected.source]}
                 </span>
-              </p>
+              </div>
+              <dl className="space-y-2 text-[13px]">
+                <div>
+                  <dt className="text-[11px] text-[#93a0b8]">출처</dt>
+                  <dd className="mt-0.5">{EVENT_SOURCE_CREDIT[selected.source]}</dd>
+                </div>
+                <div>
+                  <dt className="text-[11px] text-[#93a0b8]">발생 시각</dt>
+                  <dd className="mt-0.5">{formatOccurredAt(selected.occurredAt)}</dd>
+                </div>
+                {eventPlaceLine(selected) ? (
+                  <div>
+                    <dt className="text-[11px] text-[#93a0b8]">위치</dt>
+                    <dd className="mt-0.5">
+                      {(selected.llm?.locations?.length ? selected.llm.locations : selected.regions).join(
+                        ", ",
+                      )}
+                    </dd>
+                  </div>
+                ) : null}
+                {coordLabel(selected) ? (
+                  <div>
+                    <dt className="text-[11px] text-[#93a0b8]">좌표</dt>
+                    <dd className="mt-0.5">{coordLabel(selected)}</dd>
+                  </div>
+                ) : null}
+              </dl>
               {selected.llm?.summary ? <p>{selected.llm.summary}</p> : null}
               {selected.llm?.actions ? (
                 <p className="rounded-lg bg-[#1b2740] p-3 text-[#d5deee]">{selected.llm.actions}</p>
-              ) : null}
-              {(selected.llm?.locations?.length || selected.regions.length) > 0 ? (
-                <p>
-                  <span className="text-[#93a0b8]">위치 </span>
-                  {(selected.llm?.locations?.length ? selected.llm.locations : selected.regions).join(", ")}
-                </p>
-              ) : null}
-              {coordLabel(selected) ? (
-                <p>
-                  <span className="text-[#93a0b8]">좌표 </span>
-                  {coordLabel(selected)}
-                </p>
               ) : null}
               {selected.llm?.appearance ? (
                 <p>
@@ -403,30 +450,48 @@ export function Dashboard() {
                 </p>
               ) : null}
               {selected.photoUrl ? (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  src={selected.photoUrl}
-                  alt="실종자 공개 사진"
-                  className="max-h-48 rounded-lg object-cover"
-                />
+                <div>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={selected.photoUrl}
+                    alt="실종자 공개 사진"
+                    className="max-h-48 rounded-lg object-cover"
+                  />
+                  <p className="mt-1 text-[11px] text-[#93a0b8]">자료 출처: 경찰청</p>
+                </div>
               ) : null}
               <div>
-                <h3 className="mb-1 text-xs font-medium uppercase tracking-wide text-[#93a0b8]">원문</h3>
+                <h3 className="mb-1 text-xs font-medium tracking-wide text-[#93a0b8]">원문</h3>
                 <p className="whitespace-pre-wrap rounded-lg border border-[#243049] bg-[#0b1220] p-3 text-[#d5deee]">
                   {selected.rawText}
                 </p>
               </div>
+              <p className="text-[11px] text-[#93a0b8]">
+                {statusLabel(selected)}
+                {" · "}
+                {mapKindForEvent(selected) === "area" ? "지도: 지역 범위" : "지도: 지점 마커"}
+              </p>
             </article>
           ) : (
             <div className="space-y-4 text-sm">
               <div>
                 <h2 className="text-base font-semibold">현재 목록</h2>
                 <p className="mt-1 text-[#93a0b8]">
-                  {stats.total}건 · 오늘 {stats.today} · 최근 24시간 {stats.last24h}
+                  {stats.total}건
+                  {dateFrom && dateTo
+                    ? dateFrom === dateTo
+                      ? ` · ${dateFrom}`
+                      : ` · ${dateFrom} ~ ${dateTo}`
+                    : ` · 최근 ${meta.limit}건`}
+                  {meta.recentFrom && meta.recentTo && !dateFrom
+                    ? ` (${meta.recentFrom.slice(5).replace("-", ".")}–${meta.recentTo.slice(5).replace("-", ".")})`
+                    : ""}
+                  {` · 오늘 ${stats.today} · 최근 24시간 ${stats.last24h}`}
                 </p>
                 <p className="mt-2 text-[12px] text-[#93a0b8]">
                   목록에서 재난을 고르면 지도에 그 건만 표시됩니다.
                 </p>
+                <p className="mt-3 text-[11px] leading-4 text-[#93a0b8]">{DATA_CREDIT_LINE}</p>
               </div>
               {stats.byType.length > 0 ? (
                 <div>

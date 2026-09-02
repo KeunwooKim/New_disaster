@@ -13,10 +13,10 @@ export type MapShape = {
 };
 
 const POINT_PLACE =
-  /(\d+번길|번길|로\d+|길\b|번지|아파트|학교|병원|역\b|터미널|IC|JC|고속도로|지하차도|잠수교|하상도로|교차로|터널|방파제|갯바위|해수욕장|저수지|계곡|공원|대교|\d+\s*K)/;
+  /(\d+번길|번길|(?:대로|로|길)\s*\d+|로\d+|길\b|번지|아파트|학교|병원|역\b|터미널|IC|JC|고속도로|지하차도|잠수교|하상도로|교차로|터널|방파제|갯바위|해수욕장|저수지|계곡|공원|대교|\d+\s*K)/;
 
 const WATCH_OR_FORECAST = /주의보|경보|특보|예보|발효|발령|해제/;
-const WIDE_HAZARD = /호우|태풍|대설|한파|폭염|미세먼지|강풍|건조|풍랑|해일|황사|지진|민방공|산사태|침수/;
+const WIDE_HAZARD = /호우|태풍|대설|한파|폭염|미세먼지|강풍|건조|풍랑|너울|해일|황사|지진|민방공|산사태|침수|무더위/;
 const INCIDENT_POINT = /정전|통제해제|통제중|교통사고|화재|붕괴|유실|파손/;
 
 function lastToken(name: string): string {
@@ -72,6 +72,7 @@ export function mapKindForEvent(event: AlertEvent): MapKind {
   const locations = eventLocations(event);
   const text = event.rawText;
   const type = event.llm?.disasterType ?? "";
+  if (type === "지진") return "point";
   const distinctCities = new Set(
     locations.map((name) => name.match(/([가-힣]+(?:시|군))/)?.[1]).filter(Boolean),
   );
@@ -136,7 +137,7 @@ export function shapesForEvent(event: AlertEvent): MapShape[] {
 
   const locations = collapseSameCityDistricts(dropCoarseParents(eventLocations(event))).slice(
     0,
-    event.source === "kma_wrn" || event.source === "landslide" ? 40 : 8,
+    40,
   );
   const used = new Set<string>();
   const shapes: MapShape[] = [];
@@ -182,16 +183,18 @@ export function disasterTypeOf(event: AlertEvent): string {
   if (/민방공|공습경보/.test(text)) return "민방공";
   if (/지진/.test(text)) return "지진";
   if (/산사태/.test(text)) return "산사태";
-  if (/호우|폭우|침수/.test(text)) return "호우";
+  if (/호우|폭우|침수|소나기|많은 비|많은비|강한 비|강우|방류|비가 많이|수위/.test(text)) return "호우";
   if (/태풍/.test(text)) return "태풍";
+  if (/너울|이안류|풍랑/.test(text)) return "풍랑";
   if (/대설|폭설/.test(text)) return "대설";
   if (/한파/.test(text)) return "한파";
-  if (/폭염|열대야|온열/.test(text)) return "폭염";
+  if (/폭염|열대야|온열|무더위|무더운|더위|최고기온/.test(text)) return "폭염";
   if (/산불/.test(text)) return "산불";
   if (/미세먼지|황사/.test(text)) return "미세먼지";
   if (/정전/.test(text)) return "정전";
+  if (/물놀이/.test(text)) return "물놀이";
   if (/화재|폭발/.test(text)) return "화재";
-  if (/교통|통제|고속도로|하상도로|잠수교/.test(text)) return "교통";
+  if (/교통|통제|고속도로|하상도로|잠수교|지하차도/.test(text)) return "교통";
   return typed || "기타";
 }
 
@@ -203,6 +206,8 @@ export function disasterStyle(type: string): { color: string; emoji: string } {
       return { color: "#f97316", emoji: "🔆" };
     case "태풍":
       return { color: "#7c3aed", emoji: "🌀" };
+    case "풍랑":
+      return { color: "#0e7490", emoji: "🌊" };
     case "대설":
       return { color: "#38bdf8", emoji: "❄️" };
     case "한파":
@@ -224,6 +229,8 @@ export function disasterStyle(type: string): { color: string; emoji: string } {
       return { color: "#b45309", emoji: "⛰️" };
     case "정전":
       return { color: "#eab308", emoji: "⚡" };
+    case "물놀이":
+      return { color: "#0284c7", emoji: "🏊" };
     default:
       return { color: "#ef4444", emoji: "📍" };
   }
@@ -234,5 +241,5 @@ export function areaFill(event: AlertEvent): string {
 }
 
 export function areaLocations(event: AlertEvent): string[] {
-  return collapseSameCityDistricts(dropCoarseParents(eventLocations(event))).slice(0, 8);
+  return collapseSameCityDistricts(dropCoarseParents(eventLocations(event))).slice(0, 40);
 }

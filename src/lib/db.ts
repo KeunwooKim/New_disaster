@@ -72,7 +72,12 @@ function rowToEvent(row: EventRow): AlertEvent {
   };
 }
 
-export function listEvents(source?: EventSource, limit = 200): AlertEvent[] {
+export const DEFAULT_EVENT_LIMIT = 200;
+export const MAX_EVENT_LIMIT = 5000;
+
+const SEOUL_DAY_SQL = `date(occurred_at, '+9 hours')`;
+
+export function listEvents(source?: EventSource, limit = 2000): AlertEvent[] {
   const database = getDb();
   const rows = source
     ? database
@@ -81,6 +86,50 @@ export function listEvents(source?: EventSource, limit = 200): AlertEvent[] {
         )
         .all(source, limit)
     : database.prepare(`SELECT * FROM events ORDER BY occurred_at DESC LIMIT ?`).all(limit);
+  return (rows as EventRow[]).map(rowToEvent);
+}
+
+export function listEventDayCounts(source?: EventSource): Array<{ day: string; count: number }> {
+  const database = getDb();
+  const rows = source
+    ? database
+        .prepare(
+          `SELECT ${SEOUL_DAY_SQL} AS day, COUNT(*) AS count FROM events WHERE source = ? GROUP BY day`,
+        )
+        .all(source)
+    : database.prepare(`SELECT ${SEOUL_DAY_SQL} AS day, COUNT(*) AS count FROM events GROUP BY day`).all();
+  return rows as Array<{ day: string; count: number }>;
+}
+
+function seoulRangeUtc(fromDay: string, toDay: string): { start: string; end: string } {
+  const start = new Date(`${fromDay}T00:00:00+09:00`);
+  const end = new Date(`${toDay}T00:00:00+09:00`);
+  return {
+    start: start.toISOString(),
+    end: new Date(end.getTime() + 24 * 60 * 60 * 1000).toISOString(),
+  };
+}
+
+export function listEventsInRange(
+  fromDay: string,
+  toDay: string,
+  source?: EventSource,
+  limit = MAX_EVENT_LIMIT,
+): AlertEvent[] {
+  const { start, end } = seoulRangeUtc(fromDay, toDay);
+  const cap = Math.min(Math.max(1, limit), MAX_EVENT_LIMIT);
+  const database = getDb();
+  const rows = source
+    ? database
+        .prepare(
+          `SELECT * FROM events WHERE source = ? AND occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC LIMIT ?`,
+        )
+        .all(source, start, end, cap)
+    : database
+        .prepare(
+          `SELECT * FROM events WHERE occurred_at >= ? AND occurred_at < ? ORDER BY occurred_at DESC LIMIT ?`,
+        )
+        .all(start, end, cap);
   return (rows as EventRow[]).map(rowToEvent);
 }
 
@@ -155,7 +204,7 @@ export function listPendingAnalysis(limit = 8): AlertEvent[] {
 export function listPendingGeocode(limit = 20): AlertEvent[] {
   const rows = getDb()
     .prepare(
-      `SELECT * FROM events WHERE geocode_status = 'pending' AND lat IS NULL ORDER BY occurred_at DESC LIMIT ?`,
+      `SELECT * FROM events WHERE geocode_status IN ('pending', 'unresolved') AND lat IS NULL ORDER BY occurred_at DESC LIMIT ?`,
     )
     .all(limit) as EventRow[];
   return rows.map(rowToEvent);
@@ -207,6 +256,35 @@ export function getGeocodeCache(query: string): { lat: number; lng: number } | n
     .prepare(`SELECT lat, lng FROM geocode_cache WHERE query = ?`)
     .get(query) as { lat: number; lng: number } | undefined;
   return row ?? null;
+}
+
+export function listGeocodeCache(): Array<{ query: string; lat: number; lng: number }> {
+  return getDb()
+    .prepare(`SELECT query, lat, lng FROM geocode_cache`)
+    .all() as Array<{ query: string; lat: number; lng: number }>;
+}
+
+export function deleteGeocodeCache(query: string): void {
+  getDb().prepare(`DELETE FROM geocode_cache WHERE query = ?`).run(query);
+}
+
+export function getMissingPhoto(id: string): Buffer | null {
+  const eventId = id.startsWith("missing:") ? id : `missing:${id}`;
+  const row = getDb()
+    .prepare(`SELECT raw_json FROM events WHERE id = ? AND source = 'missing'`)
+    .get(eventId) as { raw_json: string | null } | undefined;
+  if (!row?.raw_json) return null;
+  let raw: { tknphotoFile?: unknown };
+  try {
+    raw = JSON.parse(row.raw_json) as { tknphotoFile?: unknown };
+  } catch {
+    return null;
+  }
+  const b64 = typeof raw.tknphotoFile === "string" ? raw.tknphotoFile.replace(/\s+/g, "") : "";
+  if (!b64) return null;
+  const buf = Buffer.from(b64, "base64");
+  if (buf.length < 4 || buf[0] !== 0xff || buf[1] !== 0xd8) return null;
+  return buf;
 }
 
 export function setGeocodeCache(query: string, lat: number, lng: number): void {

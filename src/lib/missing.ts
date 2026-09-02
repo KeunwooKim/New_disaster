@@ -68,14 +68,13 @@ function toPerson(row: Record<string, unknown>): MissingPerson | null {
   ].filter(Boolean);
   if (parts.length === 0) return null;
   const photoId = pick(row, ["msspsnIdntfccd"]);
+  const hasPhoto = pick(row, ["tknphotoFile"]).replace(/\s+/g, "").length > 80;
   return {
     id: `missing:${id}`,
     occurredAt: parseDate(occrde),
     rawText: parts.join(". ") + ".",
     regions: address ? [address] : [],
-    photoUrl: photoId
-      ? `https://www.safe182.go.kr/api/lcm/imgFileView.do?msspsnIdntfccd=${encodeURIComponent(photoId)}`
-      : null,
+    photoUrl: photoId && hasPhoto ? `/api/missing-photo/${encodeURIComponent(photoId)}` : null,
     raw: row,
   };
 }

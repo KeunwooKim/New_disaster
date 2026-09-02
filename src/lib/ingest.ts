@@ -10,13 +10,14 @@ import {
   updateAnalysis,
   updateCoords,
 } from "./db";
-import { resolveCoordinates } from "./geocode";
+import { resolveCoordinates, purgeImplausibleGeocodeCache, repairStoredCoordinates } from "./geocode";
+import { mapKindForEvent, eventLocations } from "./map-shape";
+import { isStreetAddress } from "./street";
 import { fetchEarthquakes } from "./kma-eqk";
 import { fetchTyphoons } from "./kma-typhoon";
 import { fetchWeatherWarnings } from "./kma-wrn";
 import { fetchLandslideForecasts } from "./landslide";
 import { analyzeEvent } from "./llm";
-import { mapKindForEvent } from "./map-shape";
 import { fetchMissingPersons } from "./missing";
 import { portalServiceKey, type PortalEvent } from "./portal";
 import { parseCbsByRules } from "./rules";
@@ -55,26 +56,21 @@ function ingestPortal(
   }
 }
 
-function reparseCbsEvents(): void {
-  for (const event of listEvents("cbs", 5000)) {
-    if (event.analysisStatus === "pending") continue;
-    const parsed = parseCbsByRules(event.rawText, event.regions, "cbs");
-    const prev = event.llm;
-    const locations =
-      parsed.disasterType === "지진" || event.analysisStatus === "rules"
-        ? parsed.locations
-        : (prev?.locations ?? parsed.locations).map((item) =>
-            item.replace(/전남광주통합특별시/g, "전라남도").replace(/전남광주(?=\s|$)/g, "전라남도").trim(),
-          );
-    const next = {
-      ...(prev ?? parsed),
-      disasterType: parsed.disasterType,
-      severity: parsed.severity,
-      actions: parsed.actions,
-      locations: [...new Set(locations.filter(Boolean))],
-    };
-    if (JSON.stringify(next) === JSON.stringify(prev)) continue;
-    updateAnalysis(event.id, next, event.analysisStatus, next.locations);
+function reparseStoredEvents(): void {
+  for (const source of ["cbs", "missing"] as const) {
+    for (const event of listEvents(source, 5000)) {
+      if (event.analysisStatus === "pending") continue;
+      const parsed = parseCbsByRules(event.rawText, [], source);
+      const prev = event.llm;
+      const next = {
+        ...parsed,
+        appearance: prev?.appearance ?? parsed.appearance,
+        clothing: prev?.clothing ?? parsed.clothing,
+        lastSeen: source === "missing" ? parsed.locations[0] ?? prev?.lastSeen : undefined,
+      };
+      if (JSON.stringify(next) === JSON.stringify(prev) && event.analysisStatus === "rules") continue;
+      updateAnalysis(event.id, next, "rules", next.locations);
+    }
   }
 }
 
@@ -171,7 +167,9 @@ export async function ingestAll(): Promise<IngestResult> {
     seedIfEmpty();
   }
 
-  reparseCbsEvents();
+  reparseStoredEvents();
+  purgeImplausibleGeocodeCache();
+  repairStoredCoordinates();
 
   const pending = listPendingAnalysis(12);
   for (const event of pending) {
@@ -186,10 +184,15 @@ export async function ingestAll(): Promise<IngestResult> {
   }
 
   const geoPending = listPendingGeocode(8);
-  const geoRetry = listCentroidGeocodes(40)
+  const geoRetry = listCentroidGeocodes(80)
     .filter((event) => mapKindForEvent(event) === "point")
     .filter((event) => !geoPending.some((row) => row.id === event.id))
-    .slice(0, 4);
+    .sort((a, b) => {
+      const aStreet = eventLocations(a).some((name) => isStreetAddress(name)) ? 1 : 0;
+      const bStreet = eventLocations(b).some((name) => isStreetAddress(name)) ? 1 : 0;
+      return bStreet - aStreet;
+    })
+    .slice(0, 12);
   for (const event of [...geoPending, ...geoRetry]) {
     const coords = await resolveCoordinates(event);
     updateCoords(event.id, coords.lat, coords.lng, coords.status);

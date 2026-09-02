@@ -5,6 +5,7 @@ import type { FeatureCollection } from "geojson";
 import L from "leaflet";
 import { GeoJSON, MapContainer, Marker, Popup, TileLayer, useMap } from "react-leaflet";
 import "leaflet/dist/leaflet.css";
+import { eventBrief, eventPlaceLine, eventPopupHtml, formatOccurredAt } from "@/lib/event-display";
 import {
   areaFill,
   areaLocations,
@@ -15,6 +16,7 @@ import {
 } from "@/lib/map-shape";
 import { featuresForLocations, type RegionCollection, type RegionFeature } from "@/lib/region-geo";
 import type { AlertEvent } from "@/lib/types";
+import { EVENT_SOURCE_CREDIT } from "@/lib/types";
 
 type Props = {
   events: AlertEvent[];
@@ -153,9 +155,7 @@ export function AlertMap({ events, isolated, selectedId, onSelect }: Props) {
             const event = code ? eventByCode.get(code) : undefined;
             if (!event) return;
             layer.on("click", () => onSelect(event.id));
-            layer.bindPopup(
-              `<strong>${disasterTypeOf(event)}</strong><br/>${(event.llm?.summary ?? event.rawText).slice(0, 80)}`,
-            );
+            layer.bindPopup(eventPopupHtml(event), { maxWidth: 280 });
           }}
         />
       ) : null}
@@ -170,12 +170,17 @@ export function AlertMap({ events, isolated, selectedId, onSelect }: Props) {
             eventHandlers={{ click: () => onSelect(event.id) }}
             zIndexOffset={selected ? 600 : 0}
           >
-            <Popup>
-              <div className="min-w-40 text-sm text-slate-900">
-                <strong>
+            <Popup maxWidth={280}>
+              <div className="min-w-52 max-w-64 text-[13px] leading-snug text-slate-900">
+                <p className="font-semibold">
                   {disasterStyle(type).emoji} {type}
-                </strong>
-                <p className="mt-1">{event.llm?.summary ?? event.rawText.slice(0, 80)}</p>
+                </p>
+                <p className="mt-1.5 text-slate-600">출처 {EVENT_SOURCE_CREDIT[event.source]}</p>
+                <p className="mt-1 text-slate-600">발생 {formatOccurredAt(event.occurredAt)}</p>
+                {eventPlaceLine(event) ? (
+                  <p className="mt-1 text-slate-600">위치 {eventPlaceLine(event)}</p>
+                ) : null}
+                <p className="mt-1.5">{eventBrief(event)}</p>
               </div>
             </Popup>
           </Marker>
