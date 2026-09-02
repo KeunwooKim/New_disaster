@@ -1,0 +1,22 @@
+{
+  "labels": [
+    "O",
+    "B-SIDO",
+    "I-SIDO",
+    "B-SGG",
+    "I-SGG",
+    "B-EMD",
+    "I-EMD",
+    "B-RI",
+    "I-RI",
+    "B-FAC",
+    "I-FAC"
+  ],
+  "type_to_label": {
+    "sido": "SIDO",
+    "sgg": "SGG",
+    "emd": "EMD",
+    "ri": "RI",
+    "facility": "FAC"
+  }
+}

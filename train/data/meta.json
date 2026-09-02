@@ -1,0 +1,39 @@
+{
+  "source": "/home/kim/urban-alert/data/ner/silver.jsonl",
+  "unique_texts": 49486,
+  "skipped_dup": 12925,
+  "splits": {
+    "train": {
+      "rows": 44592,
+      "bytes": 14556022
+    },
+    "dev": {
+      "rows": 2442,
+      "bytes": 799834
+    },
+    "test": {
+      "rows": 2452,
+      "bytes": 798593
+    }
+  },
+  "entity_types": {
+    "SGG": 50429,
+    "FAC": 3800,
+    "EMD": 5728,
+    "RI": 2245,
+    "SIDO": 14157
+  },
+  "labels": [
+    "O",
+    "B-SIDO",
+    "I-SIDO",
+    "B-SGG",
+    "I-SGG",
+    "B-EMD",
+    "I-EMD",
+    "B-RI",
+    "I-RI",
+    "B-FAC",
+    "I-FAC"
+  ]
+}
