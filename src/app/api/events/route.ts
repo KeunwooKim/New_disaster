@@ -39,6 +39,8 @@ export async function GET(request: NextRequest) {
 
   let from = parseDay(request.nextUrl.searchParams.get("from"));
   let to = parseDay(request.nextUrl.searchParams.get("to"));
+  if (from && !to) to = from;
+  if (to && !from) from = to;
   if (from && to && from > to) {
     const swap = from;
     from = to;

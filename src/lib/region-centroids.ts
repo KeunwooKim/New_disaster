@@ -165,14 +165,28 @@ function candidateKeys(name: string): string[] {
   const glued = trimmed.replace(/\s+/g, "");
   const parts = trimmed.split(" ").filter(Boolean);
   const keys = new Set<string>([trimmed, glued]);
+  const unspecial = trimmed.replace(/특별자치도/g, "도");
+  if (unspecial !== trimmed) {
+    keys.add(unspecial);
+    keys.add(unspecial.replace(/\s+/g, ""));
+  }
   for (let i = 0; i < parts.length; i += 1) {
     for (let j = parts.length; j > i; j -= 1) {
       const slice = parts.slice(i, j).join(" ");
       keys.add(slice);
       keys.add(slice.replace(/\s+/g, ""));
+      const sliceDo = slice.replace(/특별자치도/g, "도");
+      if (sliceDo !== slice) keys.add(sliceDo);
     }
   }
   return [...keys].sort((a, b) => b.length - a.length || adminSpecificity(b) - adminSpecificity(a));
+}
+
+function nameHasSgg(name: string): boolean {
+  return name.split(/\s+/).some((part) => {
+    if (AMBIGUOUS_SHORT.has(part)) return false;
+    return /(?:시|군|구|읍|면|동)$/.test(part) && !isCoarseSido(part);
+  });
 }
 
 export function lookupCentroid(name: string, context = ""): [number, number] | null {
@@ -180,12 +194,13 @@ export function lookupCentroid(name: string, context = ""): [number, number] | n
   if (!trimmed) return null;
   if (AMBIGUOUS_SHORT.has(trimmed)) return null;
   const queryFine = /(?:시|군|구|읍|면|동)$/.test(lastToken(trimmed)) && !isCoarseSido(trimmed);
+  const skipSido = queryFine || nameHasSgg(trimmed);
 
   for (const key of candidateKeys(trimmed)) {
     if (AMBIGUOUS_SHORT.has(key)) continue;
     const hit = CENTROIDS[key];
     if (!hit) continue;
-    if (queryFine && isCoarseSido(key)) continue;
+    if (skipSido && isCoarseSido(key)) continue;
     return hit;
   }
   return null;

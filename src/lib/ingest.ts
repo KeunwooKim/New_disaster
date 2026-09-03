@@ -3,19 +3,21 @@ import {
   countEvents,
   deleteEventsBySource,
   insertEvent,
-  listCentroidGeocodes,
   listEvents,
   listPendingAnalysis,
   listPendingGeocode,
   updateAnalysis,
   updateCoords,
 } from "./db";
-import { resolveCoordinates, purgeImplausibleGeocodeCache, repairStoredCoordinates } from "./geocode";
-import { mapKindForEvent, eventLocations } from "./map-shape";
-import { isStreetAddress } from "./street";
+import {
+  listRefinableCentroidPoints,
+  purgeImplausibleGeocodeCache,
+  repairStoredCoordinates,
+  resolveCoordinates,
+} from "./geocode";
 import { fetchEarthquakes } from "./kma-eqk";
 import { fetchTyphoons } from "./kma-typhoon";
-import { fetchWeatherWarnings } from "./kma-wrn";
+import { classifyWrnTitle, fetchWeatherWarnings } from "./kma-wrn";
 import { fetchLandslideForecasts } from "./landslide";
 import { analyzeEvent } from "./llm";
 import { fetchMissingPersons } from "./missing";
@@ -35,7 +37,19 @@ function ingestPortal(
   result.fetched += events.length;
   for (const event of events) {
     const analysis = parseCbsByRules(event.rawText, event.regions, source);
-    if (event.regions.length > 0 && source !== "eqk") analysis.locations = event.regions;
+    if (source === "kma_wrn") {
+      analysis.locations = event.regions;
+      const title = typeof event.raw.wrnTitle === "string" ? event.raw.wrnTitle : event.rawText;
+      const wrn = classifyWrnTitle(title);
+      analysis.disasterType = wrn.type;
+      analysis.severity = wrn.severity;
+      analysis.actions = wrn.actions;
+      if (typeof event.raw.wrnSummary === "string" && event.raw.wrnSummary.trim()) {
+        analysis.summary = event.raw.wrnSummary.trim();
+      }
+    } else if (event.regions.length > 0 && source !== "eqk") {
+      analysis.locations = event.regions;
+    }
     if (
       insertEvent({
         id: event.id,
@@ -184,19 +198,18 @@ export async function ingestAll(): Promise<IngestResult> {
   }
 
   const geoPending = listPendingGeocode(8);
-  const geoRetry = listCentroidGeocodes(80)
-    .filter((event) => mapKindForEvent(event) === "point")
+  const geoRetry = listRefinableCentroidPoints(80)
     .filter((event) => !geoPending.some((row) => row.id === event.id))
-    .sort((a, b) => {
-      const aStreet = eventLocations(a).some((name) => isStreetAddress(name)) ? 1 : 0;
-      const bStreet = eventLocations(b).some((name) => isStreetAddress(name)) ? 1 : 0;
-      return bStreet - aStreet;
-    })
-    .slice(0, 12);
+    .slice(0, 20);
   for (const event of [...geoPending, ...geoRetry]) {
     const coords = await resolveCoordinates(event);
     updateCoords(event.id, coords.lat, coords.lng, coords.status);
-    if (coords.lat != null && coords.status === "nominatim") result.geocoded += 1;
+    if (
+      coords.lat != null &&
+      (coords.status === "nominatim" || coords.status === "kakao" || coords.status === "vworld")
+    ) {
+      result.geocoded += 1;
+    }
     else if (coords.lat != null && event.lat == null) result.geocoded += 1;
   }
 

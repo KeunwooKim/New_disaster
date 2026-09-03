@@ -50,7 +50,8 @@ const SAMPLES = [
 export function seedIfEmpty(): number {
   let inserted = 0;
   for (const sample of SAMPLES) {
-    if (insertEvent(sample)) inserted += 1;
+    if (!insertEvent(sample)) continue;
+    inserted += 1;
     const analysis = parseCbsByRules(sample.rawText, sample.regions, sample.source);
     updateAnalysis(sample.id, analysis, "rules", analysis.locations);
     const query = analysis.locations[0] ?? sample.regions[0];

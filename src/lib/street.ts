@@ -1,17 +1,30 @@
-/** 도로명주소: `인더스파크로 70`, `지족로148번길`, `화곡로 10길` */
+/** 도로명주소: `인더스파크로 70`, `지족로148번길`, `화곡로 10길`, `양녕로22가길` */
 
-const STREET_RE =
-  /([가-힣0-9]{2,25}(?:대로|로|길))\s*(\d+(?:-\d+)?)(번길|번지|길)?/g;
+const BRANCH_TAIL = "(?:번길|번지|[가나다라마바사아자차카타파하]?길)";
+const STREET_RE = new RegExp(
+  `([가-힣0-9]{2,25}(?:대로|로|길))\\s*(\\d+(?:-\\d+)?)(${BRANCH_TAIL})?`,
+  "g",
+);
 
-const ROAD_SKIP = /으로$|고속도로$|자동차전용도로$/;
+const ROAD_SKIP = /으로$|고속도로$|자동차전용도로$|전용도로$|하상도로$/;
 const STEM_SKIP = /^(것|수|일|때|뒤|후|전|중|등|및|작업|발생|진화|통제|완진|복구작업|화재발생|교통통제)$/;
 
 function lastToken(name: string): string {
   return name.trim().split(/\s+/).pop() ?? name;
 }
 
+export function isRoadName(value: string): boolean {
+  const token = lastToken(value);
+  if (token.length < 3 || ROAD_SKIP.test(token) || /도로$/.test(token)) return false;
+  return /[가-힣0-9]+(?:대로|로|길)$/.test(token);
+}
+
 export function isStreetAddress(value: string): boolean {
-  return /(?:대로|로|길)\s*\d+(?:-\d+)?(?:번길|번지|길)?/.test(value);
+  return (
+    new RegExp(`(?:대로|로|길)\\s*\\d+(?:-\\d+)?${BRANCH_TAIL}?`).test(value) ||
+    /(?:대로|로)\d+[가나다라마바사아자차카타파하]길/.test(value) ||
+    isRoadName(value)
+  );
 }
 
 export function extractStreetAddresses(text: string): string[] {
@@ -26,7 +39,7 @@ export function extractStreetAddresses(text: string): string[] {
     const stem = road.replace(/(?:대로|로|길)$/, "");
     if (STEM_SKIP.test(stem)) continue;
     let label = `${road} ${num}`;
-    if (tail === "번길" || tail === "길" || tail === "번지") label += tail;
+    if (tail) label += tail;
     label = label.replace(/\s+/g, " ").trim();
     if (label.length >= 4 && !out.includes(label)) out.push(label);
   }

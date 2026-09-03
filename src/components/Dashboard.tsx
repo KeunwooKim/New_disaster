@@ -32,7 +32,9 @@ function coordLabel(event: AlertEvent): string | null {
     return event.geocodeStatus === "pending" ? "좌표 대기" : "좌표 없음";
   }
   const kind =
-    event.geocodeStatus === "nominatim"
+    event.geocodeStatus === "nominatim" ||
+    event.geocodeStatus === "kakao" ||
+    event.geocodeStatus === "vworld"
       ? "주소 좌표"
       : event.geocodeStatus === "official"
         ? "공식 좌표"

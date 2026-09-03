@@ -1,7 +1,7 @@
 import { deleteGeocodeCache, getGeocodeCache, listEvents, listGeocodeCache, setGeocodeCache, updateCoords } from "./db";
 import { eventLocations, mapKindForEvent } from "./map-shape";
 import { isSidoCentroidCoord, lookupCentroid } from "./region-centroids";
-import { extractStreetAddresses, isStreetAddress } from "./street";
+import { extractStreetAddresses, isRoadName, isStreetAddress } from "./street";
 import type { AlertEvent } from "./types";
 
 const COARSE_ALIAS = new Set([
@@ -24,7 +24,7 @@ const COARSE_ALIAS = new Set([
   "경남",
 ]);
 
-const FACILITY_RE = /([가-힣0-9]{1,12}(?:잠수교|하상도로|[가-힣]대교)|[가-힣]{2,8}교)/g;
+const FACILITY_RE = /([가-힣0-9]{1,12}(?:잠수교|하상도로|생태공원|나들목|육교|[가-힣]대교)|[가-힣0-9]{2,10}교)/g;
 const NUMBERED_RE = /([가-힣]+(?:동|리|읍|면)\s*\d+(?:-\d+)?)/g;
 
 let lastNominatimAt = 0;
@@ -35,8 +35,11 @@ function lastToken(name: string): string {
 
 export function querySpecificity(query: string): number {
   const token = lastToken(query);
-  if (/\d+번길|번지|아파트|(?:대로|로|길)\s*\d/.test(query)) return 6;
-  if (/잠수교|하상도로|대교|[가-힣]{2,8}교$/.test(query) && !/학교$/.test(token)) return 5;
+  if (/\d+번길|\d+[가나다라마바사아자차카타파하]길|번지|아파트|(?:대로|로|길)\s*\d/.test(query)) {
+    return 6;
+  }
+  if (/잠수교|하상도로|생태공원|나들목|육교|대교|[가-힣0-9]{2,10}교$/.test(query) && !/학교$/.test(token)) return 5;
+  if (isRoadName(query)) return 5;
   if (/[동리]$/.test(token) || /동\s*\d/.test(query)) return 4;
   if (/[읍면]$/.test(token)) return 3;
   if (/구$/.test(token) && !/(특별시|광역시|특별자치시)$/.test(token)) return 2;
@@ -196,16 +199,40 @@ function cachedCoords(query: string, queries: string[], context: string): [numbe
   return [cached.lat, cached.lng];
 }
 
-function nominatimVariants(query: string): string[] {
-  const compactRoad = query.replace(/((?:대로|로|길))\s+(\d)/g, "$1$2");
-  const shortAdmin = compactRoad
+function shortenAdmin(query: string): string {
+  return query
     .replace(/특별자치시/g, "")
     .replace(/광역시/g, "")
     .replace(/특별시/g, "")
     .replace(/특별자치도/g, "도")
     .replace(/\s+/g, " ")
     .trim();
-  return unique([query, compactRoad, shortAdmin]);
+}
+
+function nominatimVariants(query: string): string[] {
+  const compactRoad = query.replace(/((?:대로|로|길))\s+(\d)/g, "$1$2");
+  const spacedBranch = query.replace(
+    /((?:대로|로))(\d+(?:-\d+)?(?:번길|[가나다라마바사아자차카타파하]길))/g,
+    "$1 $2",
+  );
+  // `삼안로 153번길` / `화곡로 10길` / `양녕로22가길` → 본도로 `삼안로`
+  const branchParent = query
+    .replace(/((?:대로|로))\s*\d+(?:-\d+)?(?:번길|[가나다라마바사아자차카타파하]?길)$/, "$1")
+    .trim();
+  // `풍덕주택길 76` → 길 이름은 유지하고 건물번호만 제거
+  const dropBuilding = query.replace(/((?:대로|로|길))\s+\d+(?:-\d+)?$/, "$1").trim();
+  return unique([
+    query,
+    compactRoad,
+    spacedBranch,
+    shortenAdmin(query),
+    shortenAdmin(compactRoad),
+    shortenAdmin(spacedBranch),
+    branchParent,
+    shortenAdmin(branchParent),
+    dropBuilding,
+    shortenAdmin(dropBuilding),
+  ]).filter((item) => item.length >= 4);
 }
 
 async function nominatimAccepted(query: string, queries: string[], context: string): Promise<[number, number] | null> {
@@ -226,6 +253,208 @@ async function nominatimAccepted(query: string, queries: string[], context: stri
   return null;
 }
 
+function kakaoKey(): string | null {
+  const key = process.env.KAKAO_REST_KEY?.trim();
+  return key || null;
+}
+
+function kakaoVariants(query: string): string[] {
+  const compactRoad = query.replace(/((?:대로|로|길))\s+(\d)/g, "$1$2");
+  return unique([query, compactRoad, shortenAdmin(query), shortenAdmin(compactRoad)]).filter(
+    (item) => item.length >= 4,
+  );
+}
+
+function kakaoCached(query: string, queries: string[], context: string): [number, number] | null {
+  const cached = getGeocodeCache(`kakao:${query}`);
+  if (!cached) return null;
+  if (!acceptResolved(cached.lat, cached.lng, query, context)) return null;
+  if (!coordsFitQueries(cached.lat, cached.lng, queries, context)) return null;
+  return [cached.lat, cached.lng];
+}
+
+function kakaoPoint(doc: { x?: string; y?: string; road_address?: { x?: string; y?: string } | null }): [number, number] | null {
+  const x = Number(doc.road_address?.x ?? doc.x);
+  const y = Number(doc.road_address?.y ?? doc.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  return [y, x];
+}
+
+function kakaoTypeOk(query: string, addressType: string | undefined): boolean {
+  if (querySpecificity(query) < 5) return true;
+  return addressType !== "REGION";
+}
+
+async function kakaoFetch(path: string, query: string): Promise<Array<Record<string, unknown>>> {
+  const key = kakaoKey();
+  if (!key) return [];
+  const url = new URL(`https://dapi.kakao.com/v2/local/search/${path}.json`);
+  url.searchParams.set("query", query);
+  url.searchParams.set("size", "5");
+  const response = await fetch(url, {
+    headers: { Authorization: `KakaoAK ${key}`, Accept: "application/json" },
+    cache: "no-store",
+  });
+  if (!response.ok) return [];
+  const data = (await response.json()) as { documents?: Array<Record<string, unknown>> };
+  return data.documents ?? [];
+}
+
+async function kakaoAccepted(query: string, queries: string[], context: string): Promise<[number, number] | null> {
+  if (!kakaoKey()) return null;
+  for (const variant of kakaoVariants(query)) {
+    const cached = kakaoCached(variant, queries, context);
+    if (cached) return cached;
+    try {
+      for (const doc of await kakaoFetch("address", variant)) {
+        if (!kakaoTypeOk(query, typeof doc.address_type === "string" ? doc.address_type : undefined)) continue;
+        const coords = kakaoPoint(doc as { x?: string; y?: string; road_address?: { x?: string; y?: string } | null });
+        if (!coords) continue;
+        if (!acceptResolved(coords[0], coords[1], query, context)) continue;
+        if (!coordsFitQueries(coords[0], coords[1], queries, context)) continue;
+        setGeocodeCache(`kakao:${variant}`, coords[0], coords[1]);
+        setGeocodeCache(`kakao:${query}`, coords[0], coords[1]);
+        return coords;
+      }
+    } catch {
+      // try keyword
+    }
+  }
+
+  const cached = kakaoCached(query, queries, context);
+  if (cached) return cached;
+  try {
+    for (const doc of await kakaoFetch("keyword", query)) {
+      const coords = kakaoPoint(doc as { x?: string; y?: string });
+      if (!coords) continue;
+      if (!acceptResolved(coords[0], coords[1], query, context)) continue;
+      if (!coordsFitQueries(coords[0], coords[1], queries, context)) continue;
+      setGeocodeCache(`kakao:${query}`, coords[0], coords[1]);
+      return coords;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function vworldKey(): string | null {
+  const key = process.env.VWORLD_KEY?.trim();
+  return key || null;
+}
+
+function vworldCached(query: string, queries: string[], context: string): [number, number] | null {
+  const cached = getGeocodeCache(`vworld:${query}`);
+  if (!cached) return null;
+  if (!acceptResolved(cached.lat, cached.lng, query, context)) return null;
+  if (!coordsFitQueries(cached.lat, cached.lng, queries, context)) return null;
+  return [cached.lat, cached.lng];
+}
+
+async function vworldGetCoord(query: string, type: "road" | "parcel"): Promise<[number, number] | null> {
+  const key = vworldKey();
+  if (!key) return null;
+  const url = new URL("https://api.vworld.kr/req/address");
+  url.searchParams.set("service", "address");
+  url.searchParams.set("request", "getcoord");
+  url.searchParams.set("version", "2.0");
+  url.searchParams.set("crs", "epsg:4326");
+  url.searchParams.set("address", query);
+  url.searchParams.set("refine", "true");
+  url.searchParams.set("simple", "false");
+  url.searchParams.set("format", "json");
+  url.searchParams.set("type", type);
+  url.searchParams.set("key", key);
+  const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+  if (!response.ok) return null;
+  const data = (await response.json()) as {
+    response?: { status?: string; result?: { point?: { x?: string; y?: string } } };
+  };
+  if (data.response?.status !== "OK") return null;
+  const lng = Number(data.response.result?.point?.x);
+  const lat = Number(data.response.result?.point?.y);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return [lat, lng];
+}
+
+async function vworldSearch(query: string): Promise<[number, number] | null> {
+  const key = vworldKey();
+  if (!key) return null;
+  const url = new URL("https://api.vworld.kr/req/search");
+  url.searchParams.set("service", "search");
+  url.searchParams.set("request", "search");
+  url.searchParams.set("version", "2.0");
+  url.searchParams.set("crs", "EPSG:4326");
+  url.searchParams.set("size", "5");
+  url.searchParams.set("page", "1");
+  url.searchParams.set("query", query);
+  url.searchParams.set("type", "place");
+  url.searchParams.set("format", "json");
+  url.searchParams.set("key", key);
+  const response = await fetch(url, { headers: { Accept: "application/json" }, cache: "no-store" });
+  if (!response.ok) return null;
+  const data = (await response.json()) as {
+    response?: {
+      status?: string;
+      result?: { items?: Array<{ point?: { x?: string; y?: string } }> };
+    };
+  };
+  const point = data.response?.result?.items?.[0]?.point;
+  const lng = Number(point?.x);
+  const lat = Number(point?.y);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  return [lat, lng];
+}
+
+async function vworldAccepted(query: string, queries: string[], context: string): Promise<[number, number] | null> {
+  if (!vworldKey()) return null;
+  for (const variant of kakaoVariants(query)) {
+    const cached = vworldCached(variant, queries, context);
+    if (cached) return cached;
+    try {
+      for (const type of ["road", "parcel"] as const) {
+        const coords = await vworldGetCoord(variant, type);
+        if (!coords) continue;
+        if (!acceptResolved(coords[0], coords[1], query, context)) continue;
+        if (!coordsFitQueries(coords[0], coords[1], queries, context)) continue;
+        setGeocodeCache(`vworld:${variant}`, coords[0], coords[1]);
+        setGeocodeCache(`vworld:${query}`, coords[0], coords[1]);
+        return coords;
+      }
+    } catch {
+      // try next variant
+    }
+  }
+  try {
+    const coords = await vworldSearch(query);
+    if (
+      coords &&
+      acceptResolved(coords[0], coords[1], query, context) &&
+      coordsFitQueries(coords[0], coords[1], queries, context)
+    ) {
+      setGeocodeCache(`vworld:${query}`, coords[0], coords[1]);
+      return coords;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+async function geocodePrecise(
+  query: string,
+  queries: string[],
+  context: string,
+): Promise<{ lat: number; lng: number; status: string } | null> {
+  const nominatim = await nominatimAccepted(query, queries, context);
+  if (nominatim) return { lat: nominatim[0], lng: nominatim[1], status: "nominatim" };
+  const vworld = await vworldAccepted(query, queries, context);
+  if (vworld) return { lat: vworld[0], lng: vworld[1], status: "vworld" };
+  const kakao = await kakaoAccepted(query, queries, context);
+  if (kakao) return { lat: kakao[0], lng: kakao[1], status: "kakao" };
+  return null;
+}
+
 export async function resolveCoordinates(event: AlertEvent): Promise<{
   lat: number | null;
   lng: number | null;
@@ -240,9 +469,21 @@ export async function resolveCoordinates(event: AlertEvent): Promise<{
 
   if (wantPrecise) {
     for (const query of precise) {
-      const coords = await nominatimAccepted(query, queries, context);
-      if (coords) return { lat: coords[0], lng: coords[1], status: "nominatim" };
+      const coords = await geocodePrecise(query, queries, context);
+      if (coords) return coords;
     }
+  }
+
+  if (
+    event.lat != null &&
+    event.lng != null &&
+    (event.geocodeStatus === "nominatim" ||
+      event.geocodeStatus === "kakao" ||
+      event.geocodeStatus === "vworld" ||
+      event.geocodeStatus === "official") &&
+    coordsFitQueries(event.lat, event.lng, queries, context)
+  ) {
+    return { lat: event.lat, lng: event.lng, status: event.geocodeStatus };
   }
 
   if (centroid) return { lat: centroid[0], lng: centroid[1], status: "centroid" };
@@ -256,8 +497,8 @@ export async function resolveCoordinates(event: AlertEvent): Promise<{
   }
 
   for (const query of coarse) {
-    const coords = await nominatimAccepted(query, queries, context);
-    if (coords) return { lat: coords[0], lng: coords[1], status: "nominatim" };
+    const coords = await geocodePrecise(query, queries, context);
+    if (coords) return coords;
   }
 
   return { lat: null, lng: null, status: "unresolved" };
@@ -272,6 +513,20 @@ export function purgeImplausibleGeocodeCache(): number {
     removed += 1;
   }
   return removed;
+}
+
+export function listRefinableCentroidPoints(limit: number): AlertEvent[] {
+  return listEvents(undefined, 5000)
+    .filter((event) => event.geocodeStatus === "centroid" || event.geocodeStatus === "cache")
+    .filter((event) => event.lat != null)
+    .filter((event) => mapKindForEvent(event) === "point")
+    .filter((event) => geocodeQueries(event).some((query) => querySpecificity(query) >= 4))
+    .sort((a, b) => {
+      const specOf = (event: AlertEvent) =>
+        Math.max(0, ...geocodeQueries(event).map((query) => querySpecificity(query)));
+      return specOf(b) - specOf(a);
+    })
+    .slice(0, limit);
 }
 
 export function repairStoredCoordinates(): number {
